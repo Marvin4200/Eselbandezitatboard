@@ -265,7 +265,11 @@
         .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
         @media (max-width: 600px) {
-            .topnav { padding: 0.8rem 1rem; }
+            .topnav { padding: 0.6rem 0.75rem; }
+            .nav-brand { font-size: 0.85rem; white-space: nowrap; }
+            .nav-links { overflow-x: auto; scrollbar-width: none; flex-shrink: 1; min-width: 0; }
+            .nav-links::-webkit-scrollbar { display: none; }
+            .nav-link { white-space: nowrap; padding: 0.28rem 0.55rem; font-size: 0.72rem; }
             .container { padding: 1.5rem 1rem 0; }
         }
     </style>
@@ -338,7 +342,7 @@ function toast(msg, duration = 2500) {
 }
 
 async function loadMe() {
-    me = await fetch('/api/me').then(r => r.json());
+    me = await fetch('/api/me').then(r => r.json()).catch(() => null);
     const area = document.getElementById('userArea');
     if (me) {
         const avatarUrl = me.avatar
@@ -368,7 +372,7 @@ function setSort(s, el) {
 }
 
 async function loadQuotes() {
-    const quotes = await fetch(`/api/quotes?sort=${sort}`).then(r => r.json());
+    const quotes = await fetch(`/api/quotes?sort=${sort}`).then(r => r.json()).catch(() => []);
     const list = document.getElementById('quoteList');
     document.getElementById('quoteCount').textContent = `${quotes.length} Zitate`;
 
