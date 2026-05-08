@@ -2,6 +2,7 @@
 require('dotenv').config();
 
 const express = require('express');
+const compression = require('compression');
 const session = require('express-session');
 const Database = require('better-sqlite3');
 const path = require('path');
@@ -58,8 +59,11 @@ app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+        res.setHeader('Content-Security-Policy',
+            "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://cdn.discordapp.com; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'");
     next();
 });
+app.use(compression());
 
 app.use(session({
     secret: SESSION_SECRET,
@@ -72,6 +76,29 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ── Auth middleware ───────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
     if (!req.session.user) return res.status(401).json({ error: 'Not authenticated' });
+    // ── Rate limiting (in-memory, no external dependency) ─────────────────────────
+    const _rlStore = new Map();
+    setInterval(() => {
+        const now = Date.now();
+        for (const [k, v] of _rlStore) if (now > v.reset + 60_000) _rlStore.delete(k);
+    }, 5 * 60_000);
+    function rateLimit(max, windowMs) {
+        return (req, res, next) => {
+            const key = req.ip;
+            const now = Date.now();
+            const e = _rlStore.get(key) || { count: 0, reset: now + windowMs };
+            if (now > e.reset) { e.count = 0; e.reset = now + windowMs; }
+            if (++e.count > max) {
+                res.setHeader('Retry-After', Math.ceil((e.reset - now) / 1000));
+                return res.status(429).json({ error: 'Zu viele Anfragen. Bitte warte kurz.' });
+            }
+            _rlStore.set(key, e);
+            next();
+        };
+    }
+    const authLimiter  = rateLimit(20, 60_000);  // 20 auth attempts / min
+    const writeLimiter = rateLimit(30, 60_000);  // 30 write ops / min (quotes + votes)
+
     next();
 }
 
@@ -85,7 +112,7 @@ app.get('/auth/login', (req, res) => {
     res.redirect(url.toString());
 });
 
-app.get('/auth/callback', async (req, res) => {
+app.get('/auth/callback', authLimiter, async (req, res) => {
     const { code } = req.query;
     if (!code || typeof code !== 'string') return res.redirect('/?error=missing_code');
     try {
@@ -159,7 +186,7 @@ app.get('/api/quotes', (req, res) => {
     res.json(quotes);
 });
 
-app.post('/api/quotes', requireAuth, (req, res) => {
+app.post('/api/quotes', writeLimiter, requireAuth, (req, res) => {
     const text = String(req.body.text || '').trim();
     const attributed_to = req.body.attributed_to ? String(req.body.attributed_to).trim() : null;
 
@@ -174,7 +201,7 @@ app.post('/api/quotes', requireAuth, (req, res) => {
     res.status(201).json({ id: result.lastInsertRowid });
 });
 
-app.post('/api/quotes/:id/vote', requireAuth, (req, res) => {
+app.post('/api/quotes/:id/vote', writeLimiter, requireAuth, (req, res) => {
     const quoteId = parseInt(req.params.id, 10);
     const value = parseInt(req.body.value, 10);
     if (![1, -1].includes(value)) return res.status(400).json({ error: 'Ungültige Stimme' });
@@ -214,5 +241,12 @@ app.delete('/api/quotes/:id', requireAuth, (req, res) => {
 
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'zitat-board', uptime: process.uptime() }));
+// ── 404 & Error handlers ─────────────────────────────────────────────────────
+app.use((req, res) => res.status(404).json({ error: 'Nicht gefunden', path: req.path }));
+app.use((err, req, res, next) => {
+    console.error('[ERROR]', err.message);
+    res.status(500).json({ error: 'Interner Serverfehler' });
+});
+
 
 app.listen(PORT, () => console.log(`[quotes.eselbande.com] Running on port ${PORT}`));
