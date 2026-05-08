@@ -12,6 +12,9 @@ const DISCORD_CLIENT_ID    = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET= process.env.DISCORD_CLIENT_SECRET;
 const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || 'https://quotes.eselbande.com/auth/callback';
 const SESSION_SECRET       = process.env.SESSION_SECRET || 'change-me-in-production';
+if (SESSION_SECRET === 'change-me-in-production' && process.env.NODE_ENV === 'production') {
+    throw new Error('SESSION_SECRET must be set in production. Refusing to start.');
+}
 const MAX_QUOTE_LENGTH     = 500;
 const MAX_QUOTES_PER_USER  = 200;
 
@@ -49,6 +52,15 @@ db.exec(`
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json());
+
+// Security headers
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+});
+
 app.use(session({
     secret: SESSION_SECRET,
     resave: false,
