@@ -69,38 +69,40 @@ app.use(session({
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
-    cookie: { secure: process.env.NODE_ENV === 'production', httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000 },
+    cookie: { secure: process.env.NODE_ENV === 'production', httpOnly: true, sameSite: 'lax', maxAge: 30 * 24 * 60 * 60 * 1000 },
 }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
     if (!req.session.user) return res.status(401).json({ error: 'Not authenticated' });
-    // ── Rate limiting (in-memory, no external dependency) ─────────────────────────
-    const _rlStore = new Map();
-    setInterval(() => {
-        const now = Date.now();
-        for (const [k, v] of _rlStore) if (now > v.reset + 60_000) _rlStore.delete(k);
-    }, 5 * 60_000);
-    function rateLimit(max, windowMs) {
-        return (req, res, next) => {
-            const key = req.ip;
-            const now = Date.now();
-            const e = _rlStore.get(key) || { count: 0, reset: now + windowMs };
-            if (now > e.reset) { e.count = 0; e.reset = now + windowMs; }
-            if (++e.count > max) {
-                res.setHeader('Retry-After', Math.ceil((e.reset - now) / 1000));
-                return res.status(429).json({ error: 'Zu viele Anfragen. Bitte warte kurz.' });
-            }
-            _rlStore.set(key, e);
-            next();
-        };
-    }
-    const authLimiter  = rateLimit(20, 60_000);  // 20 auth attempts / min
-    const writeLimiter = rateLimit(30, 60_000);  // 30 write ops / min (quotes + votes)
-
     next();
 }
+
+// ── Rate limiting (in-memory, no external dependency) ─────────────────────────
+const _rlStore = new Map();
+const _rlCleanupInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of _rlStore) if (now > v.reset + 60_000) _rlStore.delete(k);
+}, 5 * 60_000);
+_rlCleanupInterval.unref();
+
+function createRateLimiter(max, windowMs) {
+    return (req, res, next) => {
+        const key = req.ip;
+        const now = Date.now();
+        const e = _rlStore.get(key) || { count: 0, reset: now + windowMs };
+        if (now > e.reset) { e.count = 0; e.reset = now + windowMs; }
+        if (++e.count > max) {
+            res.setHeader('Retry-After', Math.ceil((e.reset - now) / 1000));
+            return res.status(429).json({ error: 'Zu viele Anfragen. Bitte warte kurz.' });
+        }
+        _rlStore.set(key, e);
+        next();
+    };
+}
+const authLimiter = createRateLimiter(20, 60_000);  // 20 auth attempts / min
+const writeLimiter = createRateLimiter(30, 60_000); // 30 write ops / min
 
 // ── Discord OAuth ─────────────────────────────────────────────────────────────
 app.get('/auth/login', (req, res) => {
@@ -248,5 +250,15 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Interner Serverfehler' });
 });
 
+const server = app.listen(PORT, () => console.log(`[quotes.eselbande.com] Running on port ${PORT}`));
 
-app.listen(PORT, () => console.log(`[quotes.eselbande.com] Running on port ${PORT}`));
+function shutdown(signal) {
+    console.log(`[SHUTDOWN] ${signal} received`);
+    server.close(() => {
+        try { db.close(); } catch (_) { }
+        process.exit(0);
+    });
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
