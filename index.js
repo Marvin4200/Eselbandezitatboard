@@ -1,6 +1,7 @@
 'use strict';
 require('dotenv').config();
 
+const crypto = require('crypto');
 const express = require('express');
 const compression = require('compression');
 const session = require('express-session');
@@ -252,6 +253,59 @@ app.post('/api/quotes', writeLimiter, requireAuth, (req, res) => {
     if (count >= MAX_QUOTES_PER_USER) return res.status(429).json({ error: `Limit erreicht (max. ${MAX_QUOTES_PER_USER} Zitate)` });
 
     const result = db.prepare('INSERT INTO quotes (text, attributed_to, submitted_by) VALUES (?, ?, ?)').run(text, attributed_to, req.session.user.id);
+    res.status(201).json({ id: result.lastInsertRowid });
+});
+
+// ── Bot-Einreichung ──────────────────────────────────────────────────────────
+// Das Board blieb leer, weil Einreichen hiess: Website oeffnen, anmelden, Zitat
+// abtippen. Zitate entstehen aber im Discord. Der Bot kann hierueber direkt
+// einreichen (Rechtsklick auf eine Nachricht), ohne Browser-Sitzung.
+//
+// Absicherung: gemeinsames Geheimnis aus der Umgebung. Ohne gesetztes
+// ZITAT_BOT_TOKEN ist der Endpunkt komplett abgeschaltet - lieber kein
+// Feature als ein offener Schreibzugriff.
+const ZITAT_BOT_TOKEN = process.env.ZITAT_BOT_TOKEN || '';
+
+function requireBotToken(req, res, next) {
+    if (!ZITAT_BOT_TOKEN) return res.status(503).json({ error: 'Bot-Einreichung ist nicht konfiguriert' });
+    const sent = String(req.get('X-Bot-Token') || '');
+    // Laengenpruefung vorab, damit timingSafeEqual nicht wirft.
+    if (sent.length !== ZITAT_BOT_TOKEN.length) return res.status(403).json({ error: 'Forbidden' });
+    const ok = crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(ZITAT_BOT_TOKEN));
+    if (!ok) return res.status(403).json({ error: 'Forbidden' });
+    next();
+}
+
+app.post('/api/quotes/bot', writeLimiter, requireBotToken, (req, res) => {
+    const text = String(req.body.text || '').trim();
+    const attributed_to = req.body.attributed_to ? String(req.body.attributed_to).trim() : null;
+    const discordId = String(req.body.discord_id || '').trim();
+    const username = String(req.body.username || '').trim() || 'Unbekannt';
+
+    if (!/^[0-9]{5,25}$/.test(discordId)) return res.status(400).json({ error: 'Ungültige Discord-ID' });
+    if (!text || text.length < 3) return res.status(400).json({ error: 'Zitat zu kurz (min. 3 Zeichen)' });
+    if (text.length > MAX_QUOTE_LENGTH) return res.status(400).json({ error: `Zitat zu lang (max. ${MAX_QUOTE_LENGTH} Zeichen)` });
+    if (attributed_to && attributed_to.length > 100) return res.status(400).json({ error: 'Zuschreibung zu lang' });
+
+    // Einreichende Person anlegen bzw. auffrischen - sie hat sich hier
+    // vielleicht noch nie im Browser angemeldet.
+    db.prepare(`
+        INSERT INTO users (discord_id, username, avatar)
+        VALUES (?, ?, NULL)
+        ON CONFLICT(discord_id) DO UPDATE SET username = excluded.username
+    `).run(discordId, username.slice(0, 100));
+    const user = db.prepare('SELECT id FROM users WHERE discord_id = ?').get(discordId);
+
+    // Dasselbe Limit wie fuer Einreichungen ueber die Website.
+    const count = db.prepare('SELECT COUNT(*) AS c FROM quotes WHERE submitted_by = ?').get(user.id).c;
+    if (count >= MAX_QUOTES_PER_USER) return res.status(429).json({ error: `Limit erreicht (max. ${MAX_QUOTES_PER_USER} Zitate)` });
+
+    // Dasselbe Zitat nicht doppelt annehmen - ein zweiter Rechtsklick auf
+    // dieselbe Nachricht soll keinen Doppeleintrag erzeugen.
+    const dupe = db.prepare('SELECT id FROM quotes WHERE text = ? AND submitted_by = ?').get(text, user.id);
+    if (dupe) return res.status(200).json({ id: dupe.id, duplicate: true });
+
+    const result = db.prepare('INSERT INTO quotes (text, attributed_to, submitted_by) VALUES (?, ?, ?)').run(text, attributed_to, user.id);
     res.status(201).json({ id: result.lastInsertRowid });
 });
 
